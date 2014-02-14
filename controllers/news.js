@@ -4,6 +4,9 @@ var _ = require('underscore');
 var User = require('../models/User');
 var NewsItem = require('../models/NewsItem');
 var Vote = require('../models/Vote');
+var votesController = require('./votes');
+var addVotesToNewsItems = votesController.addVotesFor('news');
+var addVotesToItem = votesController.addVotesToItem;
 var Comment = require('../models/Comment');
 var request = require('request');
 var async = require('async');
@@ -14,13 +17,8 @@ var gravity = 1.8;
  * View top news
  */
 exports.index = function(req, res, next) {
-  NewsItem
-  .find({})
-  .sort('-created')
-  .limit(30)
-  .populate('poster')
-  .exec(function(err, newsItems) {
 
+  getNewsItems({}, req.user, function (err, newsItems) {
     if(err) return next(err);
 
     sortByScore(newsItems, req.user, function (err, newsItems) {
@@ -55,8 +53,10 @@ exports.index = function(req, res, next) {
         });
       });
 
+    res.render('news/index', {
+      title: 'Recent News',
+      items: sortByScore(newsItems)
     });
-
   });
 };
 
@@ -106,7 +106,7 @@ exports.comments = function (req, res, next) {
 
     async.parallel({
       votes: function (cb) {
-        getVotesForNewsItem(newsItem, req.user, cb);
+        addVotesToNewsItems(newsItem, req.user, cb);
       },
       comments: function (cb) {
         Comment
@@ -185,54 +185,73 @@ exports.deleteComment = function (req, res, next) {
 
   if (errors) {
     req.flash('errors', errors);
-    return res.redirect('/news/'+req.params.id);
+    return res.redirect('back');
   }
 
   Comment
   .findByIdAndRemove(req.params.comment_id)
   .exec(function(err, comment) {
-    if (err) res.redirect('/news/' + req.params.id);
+    if (err) res.redirect('back');
 
     req.flash('success', { msg: 'Comment deleted.' });
-    res.redirect('/news/'+req.params.id);
+    res.redirect('back');
   });
 };
 
-exports.userNews = function(req, res) {
-    console.log("Finding user news for id " + req.params.id);
+exports.userNews = function(req, res, next) {
+
   User
-  .find({'username': req.params.id})
-  .exec(function(err, users) {
-    NewsItem
-    .find({'poster': users[0].id})
-    .sort('-created')
-    .limit(30)
-    .populate('poster')
-    .exec(function(err, newsItems) {
-      if(err) return next(err);
+  .findOne({'username': req.params.id})
+  .exec(function(err, user) {
 
-      getVotesForNewsItems(newsItems, req.user, function (err, newsItems) {
+    if(err) return next(err);
 
-        if(err) return next(err);
-        res.render('news/index', {
-          title: 'News shared by ' + users[0].username,
-          items: newsItems,
-          filteredUser: users[0].username,
-          filteredUserWebsite: users[0].profile.website,
-            userProfile: users[0].profile
-        });
+    if(!user) {
+      req.flash('errors', { msg: "That user does not exist. "});
+      return res.redirect('/');
+    }
+
+    async.parallel({
+      newsItems: function(cb) {
+        getNewsItems({'poster': user.id}, req.user, cb);
+      },
+      comments: function(cb) {
+
+        async.waterfall([
+          function (cb) {
+            Comment
+            .find({'poster': user.id})
+            .sort('-created')
+            .limit(30)
+            .populate('poster')
+            .exec(cb);
+          },
+          function (comments, cb) {
+            getNewsItemsForComments(comments, req.user, cb);
+          }
+        ], cb);
+
+      }
+    }, function (err, results) {
+      if (err) return next(err);
+
+      res.render('news/index', {
+        title: 'Posts by ' + user.username,
+        items: results.newsItems,
+        comments: results.comments,
+        filteredUser: user.username,
+        filteredUserWebsite: user.profile.website,
+        userProfile: user.profile
       });
+
     });
   });
 };
 
-exports.sourceNews = function(req, res) {
-  NewsItem
-  .find({'source': req.params.source})
-  .sort('-created')
-  .limit(30)
-  .populate('poster')
-  .exec(function(err, newsItems) {
+exports.sourceNews = function(req, res, next) {
+  getNewsItems({'source': req.params.source}, req.user, function (err, newsItems) {
+    if(err) return next(err);
+
     res.render('news/index', {
       title: 'Recent news from ' + req.params.source,
       items: newsItems,
@@ -241,23 +260,78 @@ exports.sourceNews = function(req, res) {
   });
 };
 
+<<<<<<< HEAD
 function sortByScore(newsItems, user, callback) {
   getVotesForNewsItems(newsItems, user, function(err, newsItems) {
     if (err) return callback(err);
+=======
+function getNewsItems(query, user, callback) {
+  NewsItem
+  .find(query)
+  .sort('-created')
+  .limit(30)
+  .populate('poster')
+  .exec(function (err, newsItems) {
 
-    var now = new Date();
-    newsItems = newsItems.map(function (item) {
-      calculateScore(item, now, gravity);
-      return item;
-    });
+    if(err) return callback(err);
+>>>>>>> 6f1808175ea5e9cfce648c9441ad8cfd8904fa95
 
-    // sort with highest scores first
-    newsItems.sort(function (a,b) {
-      return b.score - a.score;
-    });
-
-    callback(null, newsItems);
+    addVotesAndCommentCountToNewsItems(newsItems, user, callback);
   });
+}
+
+function addVotesAndCommentCountToNewsItems(items, user, callback) {
+
+  async.waterfall([
+    function (cb) {
+      addVotesToNewsItems(items, user, cb);
+    },
+    function (items, cb) {
+      addCommentCountToNewsItems(items, cb);
+    }
+  ], callback);
+}
+
+function addCommentCountToNewsItems(items, callback) {
+
+  if(!items.length) return callback(null, items);
+
+  async.map(items, function (item, cb) {
+
+    Comment
+    .count({
+      item: item._id,
+      itemType: 'news'
+    })
+    .exec(function (err, count) {
+      if(err) return cb(err);
+
+      // convert to a plain object if necessary
+      item = typeof item.toObject === 'function' ? item.toObject() : item;
+
+      item.comment_count = count;
+
+      cb(null, item);
+    });
+
+  }, callback);
+}
+
+function sortByScore(newsItems) {
+  var gravity = 1.8;
+  var now = new Date();
+
+  newsItems.forEach(function (item) {
+    // calculate score modifies the item object
+    calculateScore(item, now, gravity);
+  });
+
+  // sort with highest scores first
+  newsItems.sort(function (a,b) {
+    return b.score - a.score;
+  });
+
+  return newsItems;
 }
 
 function calculateScore(item, now, gravity) {
@@ -269,50 +343,29 @@ function calculateScore(item, now, gravity) {
   item.score = votes / Math.pow(ageInHours + 2, gravity);
 }
 
-function getVotesForNewsItems(newsItems, user, callback) {
-  Vote
-  .find({ item: { $in: newsItems.map(function (item) { return item.id; }) }, itemType: { $in: ['news', null] } })
-  .exec(function (err, votes) {
+function getNewsItemsForComments(comments, user, callback) {
 
+  getNewsItems({ _id: { $in: comments.map(function (comment) { return comment.item; }) } }, user, function (err, newsItems) {
     if(err) return callback(err);
 
-    newsItems = newsItems.map(function (item) {
-      return addVotesToNewsItem(item, user, votes);
+    var newsItemsById = {};
+
+    newsItems.forEach(function (newsItem) {
+      newsItemsById[newsItem._id.toString()] = newsItem; 
     });
 
-    callback(null, newsItems);
+    comments = comments.map(function (comment) {
+      var newsItem = newsItemsById[comment.item.toString()];
+
+      comment = typeof comment.toObject === 'function' ? comment.toObject() : comment;
+
+      comment.newsItem = newsItem;
+
+      return comment;
+    });
+
+    callback(null, comments);
   });
-}
-
-function getVotesForNewsItem(newsItem, user, callback) {
-  Vote
-  .find({ item: newsItem, itemType: { $in: ['news', null] } })
-  .exec(function (err, votes) {
-
-    if(err) return callback(err);
-
-    callback(null, addVotesToNewsItem(newsItem, user, votes));
-  });
-}
-
-function addVotesToNewsItem(newsItem, user, votes) {
-
-  newsItem = typeof newsItem.toObject === 'function' ? newsItem.toObject() : newsItem;
-
-  newsItem.votes = votes
-    .filter(function (vote) {
-      return vote.item.toString() === newsItem._id.toString();
-    }).reduce(function (prev, curr, i) {
-
-      // count this item as voted for if the logged in user has a vote tallied
-      if(user && user.id && curr.voter.toString() === user.id.toString()) {
-        newsItem.votedFor = true;
-      }
-
-      return prev + curr.amount;
-    }, 0);
-
-  return newsItem;
 }
 
 /**
@@ -425,7 +478,8 @@ exports.postNews = function(req, res, next) {
       var vote = new Vote({
         item: newsItem,
         voter: req.user.id,
-        amount: 1
+        amount: 1,
+        itemType: 'news'
       });
 
       vote.save(function (err) {
@@ -444,40 +498,4 @@ exports.postNews = function(req, res, next) {
  * Vote up a news item.
  * @param {number} amount Which direction and amount to vote up a news item (limited to +1 for now)
  */
-
-exports.vote = function (req, res, next) {
-
-  req.assert('amount', 'Items can only be upvoted.').equals('1');
-
-  var errors = req.validationErrors();
-
-  if (errors) {
-    req.flash('errors', errors);
-    return res.redirect(req.get('referrer') || '/');
-  }
-
-  if (!req.user) {
-    req.flash('errors', { msg: 'Only members can upvote news items.' });
-    return res.redirect('/signup');
-  }
-
-  var vote = new Vote({
-    item: req.params.id,
-    voter: req.user.id,
-    amount: req.body.amount
-  });
-
-  vote.save(function (err) {
-    if (err) {
-      if (err.code === 11000) {
-        req.flash('errors', { msg: 'You can only upvote an item once.' });
-      }
-      return res.redirect(req.get('referrer') || '/');
-    }
-
-    req.flash('success', { msg: 'News item upvoted. Awesome!' });
-    res.redirect(req.get('referrer') || '/');
-  });
-
-
-};
+// See votes.js
